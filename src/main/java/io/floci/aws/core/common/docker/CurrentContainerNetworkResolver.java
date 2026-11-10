@@ -59,6 +59,31 @@ public class CurrentContainerNetworkResolver {
         return resolve().map(CurrentContainerNetwork::ipAddress);
     }
 
+    /**
+     * This container's address on the named Docker network, empty when Floci is not in a container
+     * or is not attached to that network. Floci sits on several networks at once (its compose
+     * project, a shared one, a private function network), and a container on one network cannot
+     * reach the address Floci has on another.
+     */
+    public Optional<String> resolveContainerIpOn(String networkName) {
+        if (networkName == null || networkName.isBlank() || !containerDetector.isRunningInContainer()) {
+            return Optional.empty();
+        }
+        String containerId = currentContainerId();
+        if (containerId.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            Map<String, ContainerNetwork> networks =
+                    dockerClient.inspectContainerCmd(containerId).exec().getNetworkSettings().getNetworks();
+            ContainerNetwork network = networks == null ? null : networks.get(networkName);
+            return network != null && isUsable(network) ? Optional.of(network.getIpAddress()) : Optional.empty();
+        } catch (Exception e) {
+            LOG.debugv("Could not read the address on network {0}: {1}", networkName, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     public OptionalInt resolvePublishedPort(int containerPort) {
         OptionalInt cachedPublishedPort = cachedPublishedPorts.get(containerPort);
         if (cachedPublishedPort != null) {
