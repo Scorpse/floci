@@ -28,7 +28,7 @@
 | `ListDeadLetterSourceQueues` | Find queues that use this queue as DLQ |
 | `StartMessageMoveTask` | Start a DLQ redrive task |
 | `ListMessageMoveTasks` | List DLQ redrive tasks |
-| `CancelMessageMoveTask` | - |
+| `CancelMessageMoveTask` | Cancel a running DLQ redrive task |
 | `AddPermission` | - |
 | `RemovePermission` | - |
 <!-- floci:actions:end -->

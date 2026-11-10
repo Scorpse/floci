@@ -8,7 +8,7 @@ Floci emulates the AWS Bedrock Runtime data-plane API. The response shape matche
 Two backends are available, selected via `floci.services.bedrock-runtime.backend`:
 
 - `stub` (default) — no real model inference: every call returns a fixed assistant turn plus synthetic token usage metadata.
-- `proxy` — forwards `Converse` and `ConverseStream` requests to any OpenAI-compatible `/chat/completions` endpoint (Ollama, OpenRouter, LiteLLM, vLLM, ...), translating request/response shapes including tool use. `InvokeModel` still falls back to the stub response in this mode. See [Proxy Backend](#proxy-backend) below.
+- `proxy` — forwards `Converse` and `ConverseStream` requests to any OpenAI-compatible `/chat/completions` endpoint (Ollama, OpenRouter, LiteLLM, vLLM, ...), translating request/response shapes including tool use. `InvokeModel` is not proxied: in this mode it fails with `400 ValidationException` (use `Converse`). See [Proxy Backend](#proxy-backend) below.
 
 The Bedrock management plane (`aws bedrock ...`: `ListFoundationModels`, `GetFoundationModel`, customization) is not yet emulated.
 
@@ -17,7 +17,7 @@ The Bedrock management plane (`aws bedrock ...`: `ListFoundationModels`, `GetFou
 | Operation | Endpoint | Notes |
 |-----------|----------|-------|
 | `Converse` | `POST /model/{modelId}/converse` | `stub`: returns a static assistant message. `proxy`: forwards to the configured OpenAI-compatible backend and translates the reply. |
-| `InvokeModel` | `POST /model/{modelId}/invoke` | Returns Anthropic-shaped body for `anthropic.*` and `*.anthropic.*` model ids; generic `{"outputs": [...]}` shape otherwise. Not proxied yet — always the stub response, regardless of backend. |
+| `InvokeModel` | `POST /model/{modelId}/invoke` | Returns Anthropic-shaped body for `anthropic.*` and `*.anthropic.*` model ids; generic `{"outputs": [...]}` shape otherwise. Not proxied yet: the `stub` backend returns the stub response, the `proxy` backend answers `400 ValidationException` (use Converse). |
 | `ConverseStream` | `POST /model/{modelId}/converse-stream` | `stub`: emits a static assistant turn as `messageStart`/`contentBlockDelta`/`contentBlockStop`/`messageStop`/`metadata` events. `proxy`: forwards a streaming request to the configured OpenAI-compatible backend and translates each SSE chunk into a Bedrock event as it arrives. Text deltas reach the client incrementally, not all at once. Response body is `application/vnd.amazon.eventstream`-framed. If the upstream stream ends without a `finish_reason` or `"[DONE]"` (e.g. a dropped connection), the failure is reported as an in-band `modelStreamErrorException` event, since the HTTP 200 is already committed by the time streaming starts, matching real Bedrock's own behavior for a mid-stream failure. |
 | `InvokeModelWithResponseStream` | `POST /model/{modelId}/invoke-with-response-stream` | Returns 501 `UnsupportedOperationException` |
 
@@ -185,7 +185,7 @@ print(resp["output"]["message"]["content"][0]["text"])
 ## Out of Scope
 
 - Real model inference with the `stub` backend (always returns a fixed string).
-- `InvokeModel` against the `proxy` backend (still returns the stub response).
+- `InvokeModel` against the `proxy` backend (answers `400 ValidationException`; use Converse).
 - `InvokeModelWithResponseStream` returns 501, regardless of backend.
 - `ConverseStream` tool calls are still accumulated across chunks and emitted as a single complete `contentBlockDelta` once the stream ends, rather than as incremental argument fragments — SDKs consume both the same way, since they concatenate `delta.toolUse.input` across events for a given `contentBlockIndex` before parsing it as JSON.
 - Bedrock management plane (`ListFoundationModels`, `GetFoundationModel`, model customisation).
