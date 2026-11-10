@@ -1854,6 +1854,27 @@ public interface EmulatorConfig {
         Optional<String> defaultPostgresImage();
 
         /**
+         * Named Docker images a DB instance can choose, as comma-separated {@code name=image} pairs,
+         * for example {@code pgvector=pgvector/pgvector:pg16}. An instance created with the tag
+         * {@code floci:image-profile} set to a name runs that image in place of the engine default,
+         * whatever its engine version, and keeps it across reboot, snapshot restore, point-in-time
+         * restore and read replicas. An unknown name is rejected, so the list is also the allow-list
+         * of images a request can make Floci pull. A delimited string for the reason the model
+         * mapping of Bedrock is one: image names contain '.' and ':'.
+         */
+        Optional<String> imageProfiles();
+
+        /**
+         * Whether a new PostgreSQL instance is initialised without {@code docker exec}: the
+         * {@code rds_iam} role is installed by an init script between create and start, and the
+         * create waits for the server to accept TCP connections. Lets Floci run behind a Docker
+         * socket proxy that refuses exec for create, describe and delete. Snapshots, log files and
+         * master-password rotation still exec. Turn it off to run the {@code psql} exec instead.
+         */
+        @WithDefault("true")
+        boolean initWithoutExec();
+
+        /**
          * S3 bucket a snapshot export stages each table's rows and Parquet in, before the finished
          * Parquet is written to the export's own bucket. Created on first use if it doesn't exist.
          */
@@ -3153,6 +3174,16 @@ public interface EmulatorConfig {
         long durableSweepIntervalSeconds();
 
         Optional<String> dockerHostOverride();
+
+        /**
+         * At startup, remove the function containers an earlier run of this Floci left behind (a
+         * killed or crashed Floci never removes its warm containers), found by the labels
+         * {@code floci_namespace} and {@code io.floci.service=lambda}, together with their code
+         * volumes. Needs {@code floci.docker.resource-namespace}: without one the labels cannot
+         * tell this Floci's containers from another's on the same daemon, so nothing is removed.
+         */
+        @WithDefault("true")
+        boolean reapOrphansOnStart();
 
         /**
          * Runtime API port pool. One port is held for the lifetime of each running Lambda

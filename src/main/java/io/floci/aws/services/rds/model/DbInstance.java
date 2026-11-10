@@ -11,6 +11,17 @@ import java.util.Map;
 @RegisterForReflection
 public class DbInstance {
 
+    /** Name of the RDS image profile (floci:image-profile tag) the instance was created with, or null. */
+    private String imageProfile;
+
+    public String getImageProfile() {
+        return imageProfile;
+    }
+
+    public void setImageProfile(String imageProfile) {
+        this.imageProfile = imageProfile;
+    }
+
     /** The fallback for existing records and requests that do not name a storage type. */
     public static final String DEFAULT_STORAGE_TYPE = "gp2";
 
