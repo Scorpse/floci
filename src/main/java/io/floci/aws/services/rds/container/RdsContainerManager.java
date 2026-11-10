@@ -416,6 +416,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             if (needsMasterGrant(engine, masterUsername)) {
                 installMasterGrantInitScript(createdContainerId, masterUsername);
             }
+            boolean execFree = engine == DatabaseEngine.POSTGRES && config.services().rds().initWithoutExec();
+            if (execFree) {
+                installPostgresIamRoleInitScript(createdContainerId);
+            }
             ContainerInfo info = lifecycleManager.startCreated(createdContainerId, spec);
             EndpointInfo endpoint = info.getEndpoint(enginePort);
 
@@ -423,7 +427,11 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             if (!engineParameterOptions(engine, engineParameters).isEmpty()) {
                 awaitServerWithParameterGroup(containerName, info.containerId(), enginePort);
             }
-            initializeEngine(containerName, info.containerId(), engine, masterUsername, masterPassword, dbName);
+            if (execFree) {
+                awaitPostgresReady(containerName, info.containerId(), endpoint, masterUsername);
+            } else {
+                initializeEngine(containerName, info.containerId(), engine, masterUsername, masterPassword, dbName);
+            }
 
             handle = new RdsContainerHandle(
                     info.containerId(), effectiveRuntimeId, instanceId,
@@ -1018,6 +1026,85 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId,
                 "/docker-entrypoint-initdb.d", "floci-master-grants.sql", sql, 0644,
                 RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
+    }
+
+    /**
+     * Installs the {@code rds_iam} role as an init script that the image runs once, against an empty
+     * data directory, so create needs no {@code docker exec}. A data directory that already exists
+     * got the role when it was first created: every Floci version creates it on first start.
+     */
+    private void installPostgresIamRoleInitScript(String containerId) {
+        byte[] sql = postgresIamRoleInitSql().getBytes(StandardCharsets.UTF_8);
+        RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId,
+                "/docker-entrypoint-initdb.d", "floci-rds-iam.sql", sql, 0644,
+                RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
+    }
+
+    /**
+     * Waits until the PostgreSQL server answers a startup packet with something other than "starting
+     * up". The official image runs first-boot init on a server that listens only on the Unix socket,
+     * so the TCP port opens with the final server, and a server still recovering answers the packet
+     * with an error that names it. Needs no exec: Floci reaches the container as its proxy does.
+     */
+    private void awaitPostgresReady(String containerName, String containerId, EndpointInfo endpoint,
+                                    String masterUsername) {
+        String user = masterUsername != null && !masterUsername.isBlank() ? masterUsername : "postgres";
+        String lastProblem = "no answer";
+        for (int attempt = 1; attempt <= POSTGRES_READY_SECONDS; attempt++) {
+            if (hasStopped(containerId)) {
+                throw new IllegalStateException("PostgreSQL in " + containerName + " stopped while starting: "
+                        + serverErrors(containerId));
+            }
+            try {
+                if (postgresAcceptsConnections(endpoint.host(), endpoint.port(), user)) {
+                    LOG.infov("PostgreSQL in RDS container {0} accepts connections", containerName);
+                    return;
+                }
+                lastProblem = "still starting up";
+            } catch (IOException e) {
+                lastProblem = e.getMessage();
+            }
+            try {
+                TimeUnit.SECONDS.sleep(1);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted waiting for PostgreSQL in " + containerName, e);
+            }
+        }
+        throw new IllegalStateException("Timed out waiting for PostgreSQL in " + containerName + ": " + lastProblem);
+    }
+
+    private static final int POSTGRES_READY_SECONDS = 120;
+
+    /**
+     * Sends a protocol 3.0 startup packet. The first reply byte {@code R} (an authentication
+     * request) means the server is up; {@code E} is an error, which only means "not yet" while it
+     * says the system is starting up or shutting down.
+     */
+    static boolean postgresAcceptsConnections(String host, int port, String user) throws IOException {
+        try (java.net.Socket socket = new java.net.Socket()) {
+            socket.connect(new java.net.InetSocketAddress(host, port), 2000);
+            socket.setSoTimeout(3000);
+            byte[] params = ("user\0" + user + "\0database\0postgres\0\0").getBytes(StandardCharsets.UTF_8);
+            java.io.DataOutputStream out = new java.io.DataOutputStream(socket.getOutputStream());
+            out.writeInt(8 + params.length);
+            out.writeInt(196608);
+            out.write(params);
+            out.flush();
+            java.io.DataInputStream in = new java.io.DataInputStream(socket.getInputStream());
+            int type = in.read();
+            if (type == 'R') {
+                return true;
+            }
+            if (type != 'E') {
+                return false;
+            }
+            int length = in.readInt();
+            byte[] body = new byte[Math.max(0, Math.min(length - 4, 4096))];
+            in.readFully(body);
+            String message = new String(body, StandardCharsets.UTF_8);
+            return !(message.contains("starting up") || message.contains("shutting down"));
+        }
     }
 
     private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description) {
