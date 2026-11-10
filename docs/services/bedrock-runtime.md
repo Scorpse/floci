@@ -147,6 +147,34 @@ Other content, including images, documents, videos, and search results, is rejec
 with `400 ValidationException` before contacting the backend, rather than being
 silently discarded.
 
+### Documents through the proxy
+
+Both `Converse` and `ConverseStream` translate inline `document` blocks
+(`format`, `name`, `source.bytes`); nothing is dropped silently:
+
+| Format | Handling |
+|---|---|
+| `txt`, `md`, `csv` | Decoded as UTF-8 and sent as a text part wrapped in `<document name="..." format="...">...</document>` |
+| `html` | Reduced to its text (scripts, styles and tags removed), then sent like the text formats |
+| `pdf` | Best effort: sent as an OpenAI `file` content part (`file_data` data URL). The backend and model must accept `file` parts (LiteLLM and OpenAI do); a backend that rejects them returns `ModelErrorException` |
+| `doc`, `docx`, `xls`, `xlsx` | Rejected with `400 ValidationException`: there is no text extraction for them |
+
+S3 sources, malformed Base64 and invalid UTF-8 in text formats are rejected with
+`400 ValidationException`. Floci does not parse PDFs itself, so it does not enforce
+Bedrock's document limits (size, page count).
+
+### Additional request fields through the proxy
+
+- `additionalModelRequestFields` (must be an object) is merged into the OpenAI request
+  body: each top-level member is forwarded as an extra field, for example
+  `{"reasoning_effort": "high"}` or provider parameters that LiteLLM accepts. Members named
+  `model`, `messages`, `stream`, `stream_options`, `tools` or `tool_choice` are ignored with a
+  warning. Bedrock model-native shapes (`reasoningConfig`, `thinking`) are forwarded as is, so
+  they only have an effect if the backend understands them.
+- `guardrailConfig`, `performanceConfig`, `requestMetadata` and `promptVariables` are accepted and
+  not applied; each logs a warning. `cachePoint` blocks in `system` and message content are
+  ignored, and `reasoningContent` blocks in the history are not replayed.
+
 It does not decode image files or enforce model-specific image dimensions and
 size limits; those remain the responsibility of the configured backend.
 
