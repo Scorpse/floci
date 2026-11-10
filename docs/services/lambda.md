@@ -639,6 +639,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 | `FLOCI_SERVICES_LAMBDA_DOCKER_FLAGS` | *(unset)* | Additional Docker flags applied to Lambda containers, including `--env`, `--volume`, `--publish`, `--add-host`, `--dns`, `--label`, `--network`, `--user`, `--privileged`, and `--platform`. Explicit `--dns` entries replace automatic embedded DNS and public fallback resolvers. Published ports support `host:container` and `127.0.0.1:host:container` forms |
 | `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
+| `FLOCI_SERVICES_LAMBDA_REAP_ORPHANS_ON_START` | `true` | At startup remove the function containers (and their code volumes) an earlier run left behind. Needs `FLOCI_DOCKER_RESOURCE_NAMESPACE`; without a namespace nothing is removed |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes; with `FLOCI_DOCKER_RESOURCE_NAMESPACE` set, the namespace follows the prefix and a short hash of it ends the volume name, e.g. `acme-<namespace>-code-<function>-<hash>-<namespace hash>`). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
 | `FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY` | `max(2, cpus/2)` | Maximum concurrent first-time code-volume populates. See the note below |
 | `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers) or `kubernetes` (pods) |
@@ -757,6 +758,10 @@ events and post results. Floci auto-detects the address containers should use
 for that callback (its own container IP on the shared network, or
 `host.docker.internal` when running on the host). In most setups this is
 correct and needs no configuration.
+
+When `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` is set and Floci is attached to that network, the address is
+Floci's own on that network, not the one it has on its first network, so a function network that holds
+nothing but Floci and the functions works without an override.
 
 On unusual network topologies, for example rootless Podman, auto-detection
 can pick an address the Lambda container cannot reach, and invocations fail with

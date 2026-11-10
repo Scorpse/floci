@@ -245,7 +245,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         image = ecrRegistryManager.rewriteImageUri(image);
 
         // Determine host address reachable from container
-        String hostAddress = dockerHostResolver.resolve();
+        String hostAddress = dockerHostResolver.resolve(config.services().lambda().dockerNetwork());
         String runtimeApiEndpoint = hostAddress + ":" + runtimeApiServer.getPort();
 
         // Give the container a human-readable name (needed for log stream name below)

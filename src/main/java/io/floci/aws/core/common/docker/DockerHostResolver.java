@@ -39,6 +39,25 @@ public class DockerHostResolver {
         this(config, containerDetector, null);
     }
 
+    /**
+     * {@link #resolve()} for a service that launches containers on its own Docker network
+     * ({@code floci.services.<service>.docker-network}): Floci's address on THAT network when it is
+     * attached to it, which is the only address a container there can reach. Falls back to
+     * {@link #resolve()} when no network is configured or Floci is not on it.
+     */
+    public String resolve(Optional<String> serviceNetwork) {
+        Optional<String> override = config.services().lambda().dockerHostOverride();
+        if ((override.isEmpty() || override.get().isBlank()) && currentContainerNetworkResolver != null
+                && serviceNetwork != null && serviceNetwork.isPresent() && !serviceNetwork.get().isBlank()) {
+            Optional<String> ip = currentContainerNetworkResolver.resolveContainerIpOn(serviceNetwork.get());
+            if (ip.isPresent()) {
+                LOG.debugv("Using the address on network {0} for the Runtime API: {1}", serviceNetwork.get(), ip.get());
+                return ip.get();
+            }
+        }
+        return resolve();
+    }
+
     public String resolve() {
         Optional<String> override = config.services().lambda().dockerHostOverride();
         if (override.isPresent() && !override.get().isBlank()) {

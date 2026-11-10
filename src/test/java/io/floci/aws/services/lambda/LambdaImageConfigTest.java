@@ -259,7 +259,8 @@ class LambdaImageConfigTest {
 
             when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
             when(runtimeApiServer.getPort()).thenReturn(9000);
-            when(dockerHostResolver.resolve()).thenReturn("127.0.0.1");
+            when(dockerHostResolver.resolve(any())).thenReturn("127.0.0.1");
+            lenient().when(dockerHostResolver.resolve()).thenReturn("127.0.0.1");
             when(lifecycleManager.create(any())).thenReturn("container-123");
             when(lifecycleManager.startCreated(eq("container-123"), any()))
                     .thenReturn(new ContainerLifecycleManager.ContainerInfo("container-123", Map.of()));

@@ -166,7 +166,8 @@ class ContainerLauncherTest {
         lenient().when(runtimeApiServer.stop()).thenReturn(CompletableFuture.completedFuture(null));
         // stop() quiesces then close()s; the unregister assertions below run past that call.
         lenient().when(runtimeApiServer.close()).thenReturn(CompletableFuture.completedFuture(null));
-        when(dockerHostResolver.resolve()).thenReturn("127.0.0.1");
+        when(dockerHostResolver.resolve(any())).thenReturn("127.0.0.1");
+        lenient().when(dockerHostResolver.resolve()).thenReturn("127.0.0.1");
         lenient().when(executionRoleCredentials.forFunction(any())).thenReturn(Optional.empty());
 
         // lenient: the failure-path test (populate fails before any container is created) never
@@ -722,7 +723,8 @@ class ContainerLauncherTest {
     void launchFunction_inPodmanComposeBridgeUsesFlociIpWithoutHostGateway() {
         CurrentContainerNetworkResolver networkResolver = mock(CurrentContainerNetworkResolver.class);
         when(networkResolver.resolveNetworkName()).thenReturn(Optional.of("podman_compose_default"));
-        when(dockerHostResolver.resolve()).thenReturn("10.89.0.5");
+        when(dockerHostResolver.resolve(any())).thenReturn("10.89.0.5");
+        lenient().when(dockerHostResolver.resolve()).thenReturn("10.89.0.5");
         lenient().when(dockerHostResolver.isLinuxHost()).thenReturn(true);
         when(config.services().lambda().extraHosts()).thenReturn(Optional.of(List.of("db.internal:10.0.0.5")));
         stubDaemonVersion(dockerClient, "linux/amd64/fedora-42",
@@ -741,7 +743,8 @@ class ContainerLauncherTest {
     void launchFunction_inNativeLinuxDockerBridgeKeepsHostAliasWithFlociIpCallback() {
         CurrentContainerNetworkResolver networkResolver = mock(CurrentContainerNetworkResolver.class);
         when(networkResolver.resolveNetworkName()).thenReturn(Optional.of("docker_compose_default"));
-        when(dockerHostResolver.resolve()).thenReturn("172.18.0.5");
+        when(dockerHostResolver.resolve(any())).thenReturn("172.18.0.5");
+        lenient().when(dockerHostResolver.resolve()).thenReturn("172.18.0.5");
         lenient().when(dockerHostResolver.isLinuxHost()).thenReturn(true);
         stubDaemonVersion(dockerClient, "Docker Engine - Community", List.of());
         LambdaFunction fn = imageFunction();
@@ -758,7 +761,8 @@ class ContainerLauncherTest {
 
     @Test
     void launchFunction_onNativeLinuxDockerAddsHostGatewayForCallback() {
-        when(dockerHostResolver.resolve()).thenReturn("host.docker.internal");
+        when(dockerHostResolver.resolve(any())).thenReturn("host.docker.internal");
+        lenient().when(dockerHostResolver.resolve()).thenReturn("host.docker.internal");
         when(dockerHostResolver.isLinuxHost()).thenReturn(true);
         stubDaemonVersion(dockerClient, "Docker Engine - Community", List.of());
 
@@ -810,7 +814,8 @@ class ContainerLauncherTest {
     @Test
     void launchFunction_appliesConfiguredDockerFlagsToRealContainer() throws Exception {
         lenient().when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.4"));
-        when(dockerHostResolver.resolve()).thenReturn("172.18.0.9");
+        when(dockerHostResolver.resolve(any())).thenReturn("172.18.0.9");
+        lenient().when(dockerHostResolver.resolve()).thenReturn("172.18.0.9");
         when(config.services().lambda().dockerFlags()).thenReturn(Optional.of(
                 "--env NODE_EXTRA_CA_CERTS=/opt/certs/root.pem "
                         + "--volume /tmp/certs:/opt/certs:ro --add-host api.local:host-gateway "
