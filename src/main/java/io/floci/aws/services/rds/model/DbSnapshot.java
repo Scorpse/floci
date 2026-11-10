@@ -11,6 +11,17 @@ import java.util.Map;
 @RegisterForReflection
 public class DbSnapshot {
 
+    /** Name of the RDS image profile (floci:image-profile tag) the instance was created with, or null. */
+    private String imageProfile;
+
+    public String getImageProfile() {
+        return imageProfile;
+    }
+
+    public void setImageProfile(String imageProfile) {
+        this.imageProfile = imageProfile;
+    }
+
     private String dbSnapshotIdentifier;
     private String dbSnapshotArn;
     private String snapshotType;

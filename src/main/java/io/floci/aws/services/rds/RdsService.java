@@ -221,6 +221,9 @@ public class RdsService implements Resettable, ResourceProvider {
     private final RdsEventPublisher eventPublisher;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final Set<String> reportedMemberRelayFailures = ConcurrentHashMap.newKeySet();
+    /** Tag that names an image profile ({@code floci.services.rds.image-profiles}) for an instance. */
+    public static final String IMAGE_PROFILE_TAG = "floci:image-profile";
+
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
     private static final int SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS = 300;
@@ -855,6 +858,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String instanceDockerVolumeName = null;
         String instanceStorageResourceId = dbiResourceId;
         String instanceImage = null;
+        String imageProfile = null;
         Map<String, String> instanceEngineParameters = null;
         PlacementResolution placement;
         DbCluster publicationCluster = null;
@@ -897,12 +901,19 @@ public class RdsService implements Resettable, ResourceProvider {
                 releaseProxyPort(proxyPort);
                 throw failure;
             }
+            try {
+                // Checked in mock mode too, so a typo in the tag fails the same way everywhere.
+                imageProfile = requestedImageProfile(tags);
+            } catch (RuntimeException | Error failure) {
+                releaseProxyPort(proxyPort);
+                throw failure;
+            }
             if (!mock) {
                 // Standalone instance, so it starts its own container. The record itself is metadata:
                 // identifier, ARN, endpoint and tags come from configuration, so the instance is
                 // created and reaches 'available' even when no Docker daemon is reachable.
                 try {
-                    instanceImage = imageForEngine(engine, engineVersion);
+                    instanceImage = imageFor(engine, engineVersion, imageProfile);
                     instanceEngineParameters = instanceEngineParameters(
                             currentAccountId(), effectiveRegion, paramGroupName);
                     instanceVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
@@ -940,6 +951,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
             instance.setRequestedPort(advertisedPort);
             instance.setOptionGroupName(optionGroupName);
+            instance.setImageProfile(imageProfile);
             instance.setDbSubnetGroupName(dbSubnetGroupName);
             instance.setContainerId(containerId);
             instance.setContainerHost(containerHost);
@@ -1281,6 +1293,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 instance.getCreatedAt(), instance.getEndpoint() != null ? instance.getEndpoint().port() : instance.getProxyPort(),
                 instance.isIamDatabaseAuthenticationEnabled(), instance.getDbiResourceId(), instance.getDbInstanceClass());
         snapshot.setStorageType(instance.getStorageType());
+        snapshot.setImageProfile(instance.getImageProfile());
         snapshot.setDbName(instance.getDbName());
         snapshot.setSnapshotType("manual");
         snapshot.setOptionGroupName(instance.getOptionGroupName());
@@ -1428,6 +1441,7 @@ public class RdsService implements Resettable, ResourceProvider {
         copy.setSnapshotCreateTime(source.getSnapshotCreateTime());
         copy.setEngine(source.getEngine());
         copy.setEngineVersion(source.getEngineVersion());
+        copy.setImageProfile(source.getImageProfile());
         copy.setAllocatedStorage(source.getAllocatedStorage());
         copy.setStorageType(source.getStorageType());
         copy.setStatus(source.getStatus());
@@ -1578,7 +1592,8 @@ public class RdsService implements Resettable, ResourceProvider {
         DbInstance instance = createDbInstance(instanceId, snapshot.getEngine().name().toLowerCase(), snapshot.getEngineVersion(),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 snapshot.getDbName(), targetClass, snapshot.getAllocatedStorage(), Boolean.TRUE.equals(iamEnabled),
-                null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null, tags, vpcSecurityGroupIds,
+                null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null,
+                withImageProfile(tags, snapshot.getImageProfile()), vpcSecurityGroupIds,
                 null, effectiveRegion, true, restoreSettings, null, requestedPort);
 
         if (!config.services().rds().mock()) {
@@ -1691,7 +1706,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 Boolean.TRUE.equals(request.iamDatabaseAuthenticationEnabled()),
                 request.dbParameterGroupName(), request.dbSubnetGroupName(), null,
                 request.availabilityZone(), Boolean.TRUE.equals(request.multiAz()), false, null,
-                request.tags() != null ? request.tags() : Map.of(),
+                withImageProfile(request.tags(), source.getImageProfile()),
                 request.vpcSecurityGroupIds() != null ? request.vpcSecurityGroupIds() : List.of(),
                 request.optionGroupName(), effectiveRegion,
                 request.autoMinorVersionUpgrade() == null || request.autoMinorVersionUpgrade(),
@@ -2301,7 +2316,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 copyTagsToSnapshot).withStorageType(
                         request.storageType() != null ? request.storageType() : source.getStorageType())
                 .withCaCertificateIdentifier(request.caCertificateIdentifier());
-        Map<String, String> tags = request.tags() != null ? request.tags() : Map.of();
+        Map<String, String> tags = withImageProfile(request.tags(), source.getImageProfile());
 
         DbInstance replica = createDbInstance(id, engineParam, source.getEngineVersion(),
                 source.getMasterUsername(), source.getMasterPassword(), source.getDbName(),
@@ -3112,7 +3127,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
                         "DBSnapshot data for " + snapshotId + " not found.", 404));
         return new SnapshotExportSource(snapshot.getDbSnapshotArn(),
-                imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
+                imageFor(snapshot.getEngine(), snapshot.getEngineVersion(), snapshot.getImageProfile()),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 snapshot.getSnapshotCreateTime(), sqlDump);
     }
@@ -5330,7 +5345,7 @@ public class RdsService implements Resettable, ResourceProvider {
         RdsContainerHandle started = containerManager.tryStart(
                 instance.getDbInstanceArn(), id, resolvedInstanceStorageResourceId(instance),
                 resolvedInstanceDockerVolumeName(instance), instance.getEngine(),
-                imageForEngine(instance.getEngine(), instance.getEngineVersion()),
+                imageFor(instance),
                 instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
                 instanceEngineParameters(instance));
         if (neverStarted && started == null
@@ -9112,6 +9127,67 @@ public class RdsService implements Resettable, ResourceProvider {
             case "sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web" -> DatabaseEngine.SQLSERVER;
             default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
         };
+    }
+
+    /** The configured {@code name=image} profiles, in configuration order. */
+    Map<String, String> imageProfiles() {
+        String raw = config.services().rds().imageProfiles().orElse("");
+        Map<String, String> profiles = new LinkedHashMap<>();
+        for (String pair : raw.split(",")) {
+            String trimmed = pair.trim();
+            int eq = trimmed.indexOf('=');
+            if (eq <= 0 || eq == trimmed.length() - 1) {
+                if (!trimmed.isEmpty()) {
+                    LOG.warnv("Ignoring malformed floci.services.rds.image-profiles entry: {0}", trimmed);
+                }
+                continue;
+            }
+            profiles.put(trimmed.substring(0, eq).trim(), trimmed.substring(eq + 1).trim());
+        }
+        return profiles;
+    }
+
+    /**
+     * The image profile a request names with the {@link #IMAGE_PROFILE_TAG} tag, validated against
+     * the configured profiles; null when it names none.
+     */
+    private String requestedImageProfile(Map<String, String> tags) {
+        String profile = tags == null ? null : tags.get(IMAGE_PROFILE_TAG);
+        if (profile == null || profile.isBlank()) {
+            return null;
+        }
+        if (!imageProfiles().containsKey(profile)) {
+            throw new AwsException("InvalidParameterValue", "Unknown RDS image profile '" + profile
+                    + "' in tag " + IMAGE_PROFILE_TAG + ". Configured profiles: "
+                    + (imageProfiles().isEmpty() ? "none (floci.services.rds.image-profiles)"
+                    : String.join(", ", imageProfiles().keySet())) + ".", 400);
+        }
+        return profile;
+    }
+
+    /** The tags of a derived instance (restore, replica) with the source's image profile carried over. */
+    private static Map<String, String> withImageProfile(Map<String, String> tags, String imageProfile) {
+        Map<String, String> result = tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+        if (imageProfile != null) {
+            result.putIfAbsent(IMAGE_PROFILE_TAG, imageProfile);
+        }
+        return result;
+    }
+
+    /** The image of an instance: its profile's when it has one that is still configured, else the engine default. */
+    String imageFor(DbInstance instance) {
+        return imageFor(instance.getEngine(), instance.getEngineVersion(), instance.getImageProfile());
+    }
+
+    private String imageFor(DatabaseEngine engine, String engineVersion, String imageProfile) {
+        if (imageProfile != null) {
+            String image = imageProfiles().get(imageProfile);
+            if (image != null) {
+                return image;
+            }
+            LOG.warnv("RDS image profile {0} is no longer configured; using the engine default image", imageProfile);
+        }
+        return imageForEngine(engine, engineVersion);
     }
 
     private String imageForEngine(DatabaseEngine engine, String engineVersion) {
