@@ -279,6 +279,9 @@ they belong to, as the model requires. An omitted `Enabled` activates the subscr
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
 | `FLOCI_SERVICES_RDS_EXPORT_STAGING_BUCKET` | `floci-rds-export-staging` | S3 bucket where snapshot exports stage rows and Parquet; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
+| `FLOCI_SERVICES_RDS_IMAGE_PROFILES` | _(none)_ | Named images an instance can choose with the `floci:image-profile` tag, as `name=image` pairs separated by commas; see [Per-instance images](#per-instance-images) |
+| `FLOCI_SERVICES_RDS_INIT_WITHOUT_EXEC` | `true` | Initialise a new PostgreSQL instance without `docker exec` (init script plus a TCP readiness probe); see [Running behind a restricted Docker socket](#running-behind-a-restricted-docker-socket) |
+| `FLOCI_SERVICES_RDS_DOCKER_NETWORK` | _(unset)_ | Docker network of the RDS containers; overrides `FLOCI_SERVICES_DOCKER_NETWORK`, so RDS and Lambda can sit on different networks |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Docker image for MySQL instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Docker image for MariaDB instances |
 | `FLOCI_SERVICES_RDS_DEFAULT_SQL_SERVER_IMAGE` | `mcr.microsoft.com/mssql/server:2022-latest` | Docker image for SQL Server instances |
@@ -287,6 +290,39 @@ they belong to, as the model requires. An omitted `Enabled` activates the subscr
 | `FLOCI_SERVICES_RDS_PROXY_MAX_CONNECTIONS` | `100` | Max concurrent connections per proxy before new ones are refused |
 | `FLOCI_SERVICES_RDS_AURORA_AUTO_PAUSE_ENABLED` | `true` | Pause an Aurora Serverless v2 cluster whose `MinCapacity` is 0 after `SecondsUntilAutoPause` without connections; see [Automatic pause and resume](#automatic-pause-and-resume) |
 | `FLOCI_SERVICES_RDS_AURORA_RESUME_DELAY_MILLIS` | `0` | How long the first connection to a paused cluster is held while it resumes; Aurora takes about `15000` |
+
+### Per-instance images
+
+`FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` is one image per engine for the whole Floci. To run
+different images side by side (plain Postgres for one application, a pgvector build for another),
+name them in `FLOCI_SERVICES_RDS_IMAGE_PROFILES` and pick one per instance with a tag:
+
+```bash
+export FLOCI_SERVICES_RDS_IMAGE_PROFILES="pgvector=pgvector/pgvector:pg16,pg17=postgres:17.11-alpine"
+
+aws rds create-db-instance --db-instance-identifier assist-db --engine postgres \
+  --master-username assist --master-user-password '...' --db-instance-class db.t3.micro \
+  --allocated-storage 20 --tags Key=floci:image-profile,Value=pgvector
+```
+
+The profile's image runs whatever `--engine-version` says (the version is only reported). An instance
+without the tag uses the engine default, as before. The profile is stored with the instance and
+reused on reboot, stop/start, snapshots, restore from snapshot, point in time restore and read
+replicas. An unknown name is refused with `InvalidParameterValue` that lists the configured
+profiles, so the list is also the allow-list of images a request can make Floci pull. Profiles apply to
+standalone instances; a cluster member shares the cluster's container.
+
+### Running behind a restricted Docker socket
+
+Creating a PostgreSQL instance used to `docker exec psql` to install the `rds_iam` role, so a Docker
+socket proxy that refuses exec (`EXEC=0`) failed the create. With `FLOCI_SERVICES_RDS_INIT_WITHOUT_EXEC=true`
+(the default) the role is installed by an init script placed between container create and start, and
+the create returns once the server answers a PostgreSQL startup packet. Create, describe and delete need
+no exec; snapshots, log files and master-password rotation still do.
+
+Set `FLOCI_SERVICES_RDS_DOCKER_NETWORK` to put the database containers on a network of their own,
+for instance one that application containers reach but Lambda function containers (`FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK`)
+do not. Floci must be attached to both networks.
 
 ### Docker Compose
 
