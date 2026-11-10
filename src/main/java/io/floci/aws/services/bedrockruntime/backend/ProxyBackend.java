@@ -37,8 +37,9 @@ import java.util.stream.Stream;
 
 /**
  * Forwards Bedrock Converse requests to any OpenAI-compatible {@code /chat/completions}
- * endpoint (Ollama, OpenRouter, LiteLLM, vLLM, ...). InvokeModel is not yet supported and
- * fails fast rather than returning a fabricated response.
+ * endpoint (Ollama, OpenRouter, LiteLLM, vLLM, ...). InvokeModel is forwarded to {@code /embeddings}
+ * for the Titan and Cohere embedding models only; any other InvokeModel fails fast rather than
+ * returning a fabricated response.
  */
 @ApplicationScoped
 public class ProxyBackend implements BedrockBackend {
@@ -100,8 +101,35 @@ public class ProxyBackend implements BedrockBackend {
 
     @Override
     public byte[] invokeModel(String modelId, byte[] body) {
-        throw new AwsException("ValidationException",
-                "InvokeModel is not supported by the bedrock-runtime proxy backend; use Converse.", 400);
+        BedrockEmbeddingsTranslator.Family family = BedrockEmbeddingsTranslator.familyOf(modelId);
+        if (family == null) {
+            throw new AwsException("ValidationException",
+                    "InvokeModel is not supported by the bedrock-runtime proxy backend for this model; use Converse. "
+                            + "Only Amazon Titan Text Embeddings and Cohere Embed models are forwarded "
+                            + "(to the backend's /embeddings endpoint).", 400);
+        }
+        EmulatorConfig.BedrockProxyConfig proxyConfig = config.services().bedrockRuntime().proxy();
+        BedrockEmbeddingsTranslator.Request embedding = BedrockEmbeddingsTranslator.toOpenAiRequest(
+                objectMapper, family, body, resolveModel(modelId, proxyConfig));
+        HttpRequest request = buildHttpRequest(proxyConfig, "/embeddings", embedding.openAiRequest());
+
+        UpstreamCall call = send(modelId, request, "backend", "request");
+        String responseBody;
+        try (InputStream stream = call.response().body()) {
+            responseBody = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException failure) {
+            LOG.warnv("Bedrock proxy backend call failed: modelId={0}", modelId);
+            throw new AwsException("ModelErrorException", "Proxy backend unavailable or disconnected.", 424);
+        } finally {
+            call.finish();
+        }
+        JsonNode openAiResponse;
+        try {
+            openAiResponse = objectMapper.readTree(responseBody);
+        } catch (Exception e) {
+            throw new AwsException("ModelErrorException", "Proxy backend returned malformed JSON: " + e.getMessage(), 424);
+        }
+        return BedrockEmbeddingsTranslator.toBedrockResponse(objectMapper, embedding, openAiResponse);
     }
 
     @Override
@@ -232,6 +260,10 @@ public class ProxyBackend implements BedrockBackend {
     }
 
     private HttpRequest buildHttpRequest(EmulatorConfig.BedrockProxyConfig proxyConfig, ObjectNode openAiRequest) {
+        return buildHttpRequest(proxyConfig, "/chat/completions", openAiRequest);
+    }
+
+    private HttpRequest buildHttpRequest(EmulatorConfig.BedrockProxyConfig proxyConfig, String path, ObjectNode openAiRequest) {
         String baseUrl = proxyConfig.url()
                 .filter(url -> !url.isBlank())
                 .orElseThrow(() -> new AwsException("ValidationException",
@@ -246,7 +278,7 @@ public class ProxyBackend implements BedrockBackend {
 
         HttpRequest.Builder builder;
         try {
-            URI uri = URI.create(stripTrailingSlash(baseUrl) + "/chat/completions");
+            URI uri = URI.create(stripTrailingSlash(baseUrl) + path);
             builder = HttpRequest.newBuilder()
                     .uri(uri)
                     .POST(HttpRequest.BodyPublishers.ofByteArray(requestBody))

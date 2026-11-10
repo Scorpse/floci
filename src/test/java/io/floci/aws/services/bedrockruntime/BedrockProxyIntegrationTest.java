@@ -66,7 +66,7 @@ class BedrockProxyIntegrationTest {
     @BeforeEach
     void setUp() throws IOException {
         backend = HttpServer.create(new InetSocketAddress("127.0.0.1", PORT), 0);
-        backend.createContext("/v1/chat/completions", exchange -> {
+        com.sun.net.httpserver.HttpHandler handler = exchange -> {
             byte[] reqBody = exchange.getRequestBody().readAllBytes();
             received.set(new RecordedRequest(exchange.getRequestURI().getPath(), exchange.getRequestHeaders(), reqBody));
 
@@ -75,7 +75,9 @@ class BedrockProxyIntegrationTest {
             exchange.sendResponseHeaders(nextResponseStatus.get(), resp.length);
             exchange.getResponseBody().write(resp);
             exchange.close();
-        });
+        };
+        backend.createContext("/v1/chat/completions", handler);
+        backend.createContext("/v1/embeddings", handler);
         backend.start();
     }
 
@@ -1472,6 +1474,97 @@ class BedrockProxyIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
+        assertNull(received.get());
+    }
+
+    private io.restassured.response.ValidatableResponse invoke(String modelId, String body) {
+        return given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/model/" + modelId + "/invoke")
+        .then();
+    }
+
+    @Test
+    void titanEmbeddingsAreForwardedToTheEmbeddingsEndpoint() throws IOException {
+        nextResponseBody.set("""
+            {"data":[{"index":0,"embedding":[0.5,-0.25,1.0]}],"usage":{"prompt_tokens":4,"total_tokens":4}}
+            """);
+        invoke("amazon.titan-embed-text-v2:0", """
+            {"inputText":"hello world","dimensions":3,"normalize":true}
+            """)
+            .statusCode(200)
+            .body("embedding", Matchers.contains(0.5f, -0.25f, 1.0f))
+            .body("inputTextTokenCount", equalTo(4));
+
+        assertEquals("/v1/embeddings", received.get().path());
+        JsonNode sent = objectMapper.readTree(received.get().body());
+        assertEquals("amazon.titan-embed-text-v2:0", sent.path("model").asText());
+        assertEquals("hello world", sent.path("input").get(0).asText());
+        assertEquals(3, sent.path("dimensions").asInt());
+    }
+
+    @Test
+    void cohereEmbeddingsKeepTheirInputOrder() throws IOException {
+        nextResponseBody.set("""
+            {"data":[{"index":0,"embedding":[1.0,2.0]},{"index":1,"embedding":[3.0,4.0]}],"usage":{"prompt_tokens":6}}
+            """);
+        invoke("cohere.embed-multilingual-v3", """
+            {"texts":["a","b"],"input_type":"search_document"}
+            """)
+            .statusCode(200)
+            .body("response_type", equalTo("embeddings_floats"))
+            .body("embeddings[0]", Matchers.contains(1.0f, 2.0f))
+            .body("embeddings[1]", Matchers.contains(3.0f, 4.0f));
+        assertEquals(2, objectMapper.readTree(received.get().body()).path("input").size());
+
+        invoke("cohere.embed-multilingual-v3", """
+            {"texts":["a","b"],"input_type":"search_query","embedding_types":["float"]}
+            """)
+            .statusCode(200)
+            .body("response_type", equalTo("embeddings_by_type"))
+            .body("embeddings.float[1]", Matchers.contains(3.0f, 4.0f));
+    }
+
+    @Test
+    void embeddingDimensionMismatchIsAnExplicitError() {
+        nextResponseBody.set("""
+            {"data":[{"index":0,"embedding":[1.0,2.0]}]}
+            """);
+        invoke("amazon.titan-embed-text-v2:0", """
+            {"inputText":"x","dimensions":1024}
+            """)
+            .statusCode(424)
+            .body("__type", equalTo("ModelErrorException"))
+            .body("message", containsString("2 dimensions but 1024"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"inputText\":\"\"}", "[]", "not json"})
+    void invalidTitanEmbeddingRequestsFailBeforeCallingProxy(String body) {
+        invoke("amazon.titan-embed-text-v1", body)
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+        assertNull(received.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"texts\":[]}", "{\"texts\":[1]}", "{\"texts\":[\"a\"],\"embedding_types\":[\"int8\"]}"})
+    void invalidCohereEmbeddingRequestsFailBeforeCallingProxy(String body) {
+        invoke("cohere.embed-english-v3", body)
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+        assertNull(received.get());
+    }
+
+    @Test
+    void nonEmbeddingModelsStillFailInvokeModelWithAnExplicitError() {
+        invoke("meta.llama3-70b-instruct-v1:0", "{\"prompt\":\"hi\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("Titan Text Embeddings and Cohere Embed"));
         assertNull(received.get());
     }
 }
