@@ -1328,4 +1328,150 @@ class BedrockProxyIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
     }
+
+    private static String b64(String text) {
+        return Base64.getEncoder().encodeToString(text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private JsonNode converseAndGetBackendRequest(String requestBody, String operation) throws IOException {
+        nextResponseBody.set("""
+            {"choices":[{"finish_reason":"stop","message":{"content":"ok"}}]}
+            """);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(requestBody)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+        .then()
+            .statusCode(200);
+        return objectMapper.readTree(received.get().body());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"converse", "converse-stream"})
+    void textDocumentsAreForwardedAsText(String operation) throws IOException {
+        JsonNode sent = converseAndGetBackendRequest("""
+            {"messages":[{"role":"user","content":[
+                {"text":"Summarise"},
+                {"document":{"format":"csv","name":"report","source":{"bytes":"%s"}}}
+            ]}]}
+            """.formatted(b64("a,b\n1,2")), operation);
+        String content = sent.path("messages").get(0).path("content").asText();
+        assertEquals("Summarise\n<document name=\"report\" format=\"csv\">\na,b\n1,2\n</document>", content);
+    }
+
+    @Test
+    void htmlDocumentsAreReducedToText() throws IOException {
+        JsonNode sent = converseAndGetBackendRequest("""
+            {"messages":[{"role":"user","content":[
+                {"document":{"format":"html","name":"page","source":{"bytes":"%s"}}}
+            ]}]}
+            """.formatted(b64("<html><style>p{}</style><body><h1>Title</h1><p>A &amp; B</p><script>x()</script></body></html>")),
+                "converse");
+        String content = sent.path("messages").get(0).path("content").asText();
+        assertTrue(content.contains("Title\nA & B"), content);
+        assertFalse(content.contains("<h1>") || content.contains("x()") || content.contains("p{}"), content);
+    }
+
+    @Test
+    void pdfDocumentsAreForwardedAsFileParts() throws IOException {
+        JsonNode sent = converseAndGetBackendRequest("""
+            {"messages":[{"role":"user","content":[
+                {"text":"Extract"},
+                {"document":{"format":"pdf","name":"invoice","source":{"bytes":"AQID"}}}
+            ]}]}
+            """, "converse");
+        JsonNode parts = sent.path("messages").get(0).path("content");
+        assertEquals("text", parts.get(0).path("type").asText());
+        assertEquals("file", parts.get(1).path("type").asText());
+        assertEquals("invoice.pdf", parts.get(1).path("file").path("filename").asText());
+        assertEquals("data:application/pdf;base64,AQID", parts.get(1).path("file").path("file_data").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{\"format\":\"docx\",\"name\":\"d\",\"source\":{\"bytes\":\"AQID\"}}",
+        "{\"format\":\"xlsx\",\"name\":\"d\",\"source\":{\"bytes\":\"AQID\"}}",
+        "{\"format\":\"rtf\",\"name\":\"d\",\"source\":{\"bytes\":\"AQID\"}}",
+        "{\"format\":\"pdf\",\"name\":\"d\",\"source\":{\"s3Location\":{\"uri\":\"s3://b/k\"}}}",
+        "{\"format\":\"pdf\",\"name\":\"d\",\"source\":{\"bytes\":\"not base64!\"}}",
+        "{\"format\":\"txt\",\"name\":\"d\",\"source\":{\"bytes\":\"/w==\"}}",
+        "{\"format\":\"txt\",\"name\":\"d\"}"
+    })
+    void unsupportedOrInvalidDocumentsFailBeforeCallingProxy(String document) {
+        for (String operation : new String[]{"converse", "converse-stream"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {"messages":[{"role":"user","content":[{"text":"x"},{"document":%s}]}]}
+                    """.formatted(document))
+            .when()
+                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+            assertNull(received.get());
+        }
+    }
+
+    @Test
+    void unknownContentBlocksAreRejectedNotDropped() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages":[{"role":"user","content":[{"text":"x"},{"video":{"format":"mp4","source":{"bytes":"AQID"}}}]}]}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("video"));
+        assertNull(received.get());
+    }
+
+    @Test
+    void cachePointBlocksAreIgnored() throws IOException {
+        JsonNode sent = converseAndGetBackendRequest("""
+            {"system":[{"text":"sys"},{"cachePoint":{"type":"default"}}],
+             "messages":[{"role":"user","content":[{"text":"hi"},{"cachePoint":{"type":"default"}}]}]}
+            """, "converse");
+        assertEquals(2, sent.path("messages").size());
+        assertEquals("hi", sent.path("messages").get(1).path("content").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"converse", "converse-stream"})
+    void additionalModelRequestFieldsAreForwardedAndGuardedFieldsIgnored(String operation) throws IOException {
+        JsonNode sent = converseAndGetBackendRequest("""
+            {"messages":[{"role":"user","content":[{"text":"hi"}]}],
+             "additionalModelRequestFields":{"reasoning_effort":"high","thinking":{"type":"enabled","budget_tokens":2048},
+                                             "model":"evil","messages":[]},
+             "guardrailConfig":{"guardrailIdentifier":"g","guardrailVersion":"1"}}
+            """, operation);
+        assertEquals("high", sent.path("reasoning_effort").asText());
+        assertEquals(2048, sent.path("thinking").path("budget_tokens").asInt());
+        assertFalse("evil".equals(sent.path("model").asText()));
+        assertEquals(1, sent.path("messages").size());
+        assertFalse(sent.has("guardrailConfig"));
+    }
+
+    @Test
+    void nonObjectAdditionalModelRequestFieldsAreRejected() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"messages":[{"role":"user","content":[{"text":"hi"}]}],"additionalModelRequestFields":"x"}
+                """)
+        .when()
+            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+        assertNull(received.get());
+    }
 }

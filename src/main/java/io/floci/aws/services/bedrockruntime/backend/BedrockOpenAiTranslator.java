@@ -11,12 +11,18 @@ import io.floci.aws.core.common.AwsException;
 import org.jboss.logging.Logger;
 
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -49,6 +55,9 @@ final class BedrockOpenAiTranslator {
                     ObjectNode msg = openAiMessages.addObject();
                     msg.put("role", "system");
                     msg.put("content", text);
+                } else if (!block.has("cachePoint")) {
+                    throw new AwsException("ValidationException",
+                            "The proxy supports only text and cachePoint blocks in system.", 400);
                 }
             }
         }
@@ -110,8 +119,47 @@ final class BedrockOpenAiTranslator {
         }
 
         translateOutputConfig(mapper, bedrockRequest.path("outputConfig"), openAi);
+        applyAdditionalModelRequestFields(bedrockRequest.path("additionalModelRequestFields"), openAi);
+        noteIgnoredFields(bedrockRequest);
 
         return openAi;
+    }
+
+    /** Fields the translator owns; additionalModelRequestFields must not be able to break the request. */
+    private static final Set<String> PROTECTED_REQUEST_FIELDS =
+            Set.of("model", "messages", "stream", "stream_options", "tools", "tool_choice");
+
+    /**
+     * Forwards the top-level members of {@code additionalModelRequestFields} to the backend as
+     * extra request-body fields (for example {@code reasoning_effort} or provider specific
+     * parameters that LiteLLM and similar gateways accept). Members that would replace a field the
+     * translator owns are ignored with a warning.
+     */
+    private static void applyAdditionalModelRequestFields(JsonNode additional, ObjectNode openAi) {
+        if (additional.isMissingNode() || additional.isNull()) {
+            return;
+        }
+        if (!additional.isObject()) {
+            throw new AwsException("ValidationException", "additionalModelRequestFields must be an object.", 400);
+        }
+        Iterator<Map.Entry<String, JsonNode>> fields = additional.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            if (PROTECTED_REQUEST_FIELDS.contains(field.getKey())) {
+                LOG.warnv("Ignoring additionalModelRequestFields member that the proxy owns: {0}", field.getKey());
+                continue;
+            }
+            openAi.set(field.getKey(), field.getValue().deepCopy());
+        }
+    }
+
+    /** Converse request members with no OpenAI equivalent are accepted but ignored, and say so in the log. */
+    private static void noteIgnoredFields(JsonNode request) {
+        for (String name : List.of("guardrailConfig", "performanceConfig", "requestMetadata", "promptVariables")) {
+            if (request.has(name)) {
+                LOG.warnv("Converse field {0} is accepted but not applied by the bedrock-runtime proxy backend", name);
+            }
+        }
     }
 
     /**
@@ -190,7 +238,7 @@ final class BedrockOpenAiTranslator {
         JsonNode content = message.path("content");
         StringBuilder text = new StringBuilder();
         ArrayNode parts = mapper.createArrayNode();
-        boolean hasImages = false;
+        boolean hasParts = false;
         ArrayNode toolCalls = null;
 
         if (content.isArray()) {
@@ -219,7 +267,19 @@ final class BedrockOpenAiTranslator {
                 if (block.has("image")) {
                     parts.addObject().put("type", "image_url").putObject("image_url")
                             .put("url", imageDataUrl(block.path("image")));
-                    hasImages = true;
+                    hasParts = true;
+                    continue;
+                }
+                if (block.has("document")) {
+                    hasParts |= translateDocument(block.path("document"), parts, text);
+                    continue;
+                }
+                if (block.has("cachePoint")) {
+                    continue;
+                }
+                if (block.has("reasoningContent")) {
+                    // Prior reasoning is not replayed to OpenAI-compatible backends.
+                    LOG.debug("Dropping reasoningContent block from conversation history");
                     continue;
                 }
                 String blockText = block.path("text").asText(null);
@@ -229,14 +289,19 @@ final class BedrockOpenAiTranslator {
                         text.append('\n');
                     }
                     text.append(blockText);
+                    continue;
                 }
+                throw new AwsException("ValidationException",
+                        "The proxy does not support content block(s) " + fieldNames(block)
+                                + "; supported blocks are text, image, document, toolUse, toolResult, cachePoint.",
+                        400);
             }
         }
 
-        if (text.length() > 0 || hasImages || toolCalls != null) {
+        if (text.length() > 0 || hasParts || toolCalls != null) {
             ObjectNode msg = openAiMessages.addObject();
             msg.put("role", role);
-            if (hasImages) {
+            if (hasParts) {
                 msg.set("content", parts);
             } else if (text.length() > 0) {
                 msg.put("content", text.toString());
@@ -249,6 +314,90 @@ final class BedrockOpenAiTranslator {
                 msg.set("tool_calls", toolCalls);
             }
         }
+    }
+
+    private static final Set<String> TEXT_DOCUMENT_FORMATS = Set.of("txt", "md", "csv", "html");
+    private static final Set<String> UNSUPPORTED_DOCUMENT_FORMATS = Set.of("doc", "docx", "xls", "xlsx");
+    private static final Pattern HTML_SCRIPT_STYLE = Pattern.compile("(?is)<(script|style)\\b.*?</\\1\\s*>");
+    private static final Pattern HTML_BREAKS = Pattern.compile("(?i)<(br|/p|/div|/li|/tr|/h[1-6])\\s*/?>");
+    private static final Pattern HTML_TAG = Pattern.compile("(?s)<[^>]*>");
+    private static final Pattern BLANK_RUNS = Pattern.compile("[ \\t]*\\n(?:[ \\t]*\\n)+");
+
+    /**
+     * Converts a Converse {@code document} block. Text formats (txt, md, csv, html) are decoded and
+     * sent as a text part wrapped in a {@code <document>} element (HTML is reduced to its text); pdf
+     * is sent as an OpenAI {@code file} content part (best effort: the backend must support it, and
+     * its rejection comes back as ModelErrorException); doc, docx, xls and xlsx are rejected with a
+     * ValidationException, because there is no extraction for them. Nothing is dropped silently.
+     *
+     * @return true when a non-text part was added, so the message must use content parts
+     */
+    private static boolean translateDocument(JsonNode document, ArrayNode parts, StringBuilder text) {
+        String format = document.path("format").asText("");
+        String name = document.path("name").asText("document");
+        if (UNSUPPORTED_DOCUMENT_FORMATS.contains(format)) {
+            throw new AwsException("ValidationException", "Document format " + format
+                    + " is not supported by the bedrock-runtime proxy backend (no text extraction); "
+                    + "supported formats are pdf, txt, md, csv and html.", 400);
+        }
+        if (!TEXT_DOCUMENT_FORMATS.contains(format) && !"pdf".equals(format)) {
+            throw new AwsException("ValidationException",
+                    "Document format must be pdf, csv, doc, docx, xls, xlsx, html, txt, or md.", 400);
+        }
+        JsonNode source = document.path("source");
+        JsonNode bytes = source.path("bytes");
+        if (!source.isObject() || source.size() != 1 || !bytes.isTextual() || bytes.asText().isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "The proxy supports only inline document source.bytes; provide non-empty Base64 bytes, not S3 sources.",
+                    400);
+        }
+        byte[] decoded;
+        try {
+            decoded = Base64.getDecoder().decode(bytes.asText());
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException", "Document source.bytes must contain valid Base64.", 400);
+        }
+        if ("pdf".equals(format)) {
+            ObjectNode file = parts.addObject().put("type", "file").putObject("file");
+            file.put("filename", name + ".pdf");
+            file.put("file_data", "data:application/pdf;base64," + bytes.asText());
+            return true;
+        }
+        String content;
+        try {
+            content = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(decoded)).toString();
+        } catch (CharacterCodingException e) {
+            throw new AwsException("ValidationException", "Document " + format + " bytes must be valid UTF-8 text.", 400);
+        }
+        if ("html".equals(format)) {
+            content = htmlToText(content);
+        }
+        String wrapped = "<document name=\"" + name.replace("\"", "&quot;") + "\" format=\"" + format + "\">\n"
+                + content + "\n</document>";
+        parts.addObject().put("type", "text").put("text", wrapped);
+        if (text.length() > 0) {
+            text.append('\n');
+        }
+        text.append(wrapped);
+        return false;
+    }
+
+    static String htmlToText(String html) {
+        String stripped = HTML_SCRIPT_STYLE.matcher(html).replaceAll("");
+        stripped = HTML_BREAKS.matcher(stripped).replaceAll("\n");
+        stripped = HTML_TAG.matcher(stripped).replaceAll("");
+        stripped = stripped.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&");
+        return BLANK_RUNS.matcher(stripped).replaceAll("\n\n").strip();
+    }
+
+    private static String fieldNames(JsonNode block) {
+        List<String> names = new ArrayList<>();
+        block.fieldNames().forEachRemaining(names::add);
+        return names.toString();
     }
 
     private static String imageDataUrl(JsonNode image) {
