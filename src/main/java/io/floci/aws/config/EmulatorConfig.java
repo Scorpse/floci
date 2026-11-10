@@ -3176,16 +3176,6 @@ public interface EmulatorConfig {
         Optional<String> dockerHostOverride();
 
         /**
-         * At startup, remove the function containers an earlier run of this Floci left behind (a
-         * killed or crashed Floci never removes its warm containers), found by the labels
-         * {@code floci_namespace} and {@code io.floci.service=lambda}, together with their code
-         * volumes. Needs {@code floci.docker.resource-namespace}: without one the labels cannot
-         * tell this Floci's containers from another's on the same daemon, so nothing is removed.
-         */
-        @WithDefault("true")
-        boolean reapOrphansOnStart();
-
-        /**
          * Runtime API port pool. One port is held for the lifetime of each running Lambda
          * container, so this range is a hard ceiling on concurrent Lambda executions.
          *
