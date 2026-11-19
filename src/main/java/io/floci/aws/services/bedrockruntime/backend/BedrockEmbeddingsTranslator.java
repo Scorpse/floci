@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 
 import java.util.Locale;
+import java.util.UUID;
 
 /**
  * Translates the InvokeModel bodies of the Bedrock embedding models (Amazon Titan Text Embeddings
@@ -115,7 +116,7 @@ final class BedrockEmbeddingsTranslator {
             root.put("inputTextTokenCount", tokens);
             root.putObject("embeddingsByType").set("float", vectors.get(0));
         } else {
-            root.put("id", "floci-embed-" + java.util.UUID.randomUUID());
+            root.put("id", "floci-embed-" + UUID.randomUUID());
             if (request.cohereByType()) {
                 root.putObject("embeddings").set("float", vectors);
                 root.put("response_type", "embeddings_by_type");

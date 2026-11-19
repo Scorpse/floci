@@ -5,10 +5,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.Headers;
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterEach;
@@ -66,7 +68,7 @@ class BedrockProxyIntegrationTest {
     @BeforeEach
     void setUp() throws IOException {
         backend = HttpServer.create(new InetSocketAddress("127.0.0.1", BEDROCK_PROXY_PORT), 0);
-        com.sun.net.httpserver.HttpHandler handler = exchange -> {
+        HttpHandler handler = exchange -> {
             byte[] reqBody = exchange.getRequestBody().readAllBytes();
             received.set(new RecordedRequest(exchange.getRequestURI().getPath(), exchange.getRequestHeaders(), reqBody));
 
@@ -1344,7 +1346,7 @@ class BedrockProxyIntegrationTest {
             .header("Authorization", AUTH_HEADER)
             .body(requestBody)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/" + operation)
         .then()
             .statusCode(200);
         return objectMapper.readTree(received.get().body());
@@ -1410,7 +1412,7 @@ class BedrockProxyIntegrationTest {
                     {"messages":[{"role":"user","content":[{"text":"x"},{"document":%s}]}]}
                     """.formatted(document))
             .when()
-                .post("/model/" + MAPPED_MODEL_ID + "/" + operation)
+                .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/" + operation)
             .then()
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
@@ -1427,7 +1429,7 @@ class BedrockProxyIntegrationTest {
                 {"messages":[{"role":"user","content":[{"text":"x"},{"video":{"format":"mp4","source":{"bytes":"AQID"}}}]}]}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
@@ -1470,14 +1472,14 @@ class BedrockProxyIntegrationTest {
                 {"messages":[{"role":"user","content":[{"text":"hi"}]}],"additionalModelRequestFields":"x"}
                 """)
         .when()
-            .post("/model/" + MAPPED_MODEL_ID + "/converse")
+            .post("/model/" + BEDROCK_PROXY_MAPPED_MODEL_ID + "/converse")
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"));
         assertNull(received.get());
     }
 
-    private io.restassured.response.ValidatableResponse invoke(String modelId, String body) {
+    private ValidatableResponse invoke(String modelId, String body) {
         return given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)

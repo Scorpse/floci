@@ -30,8 +30,12 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -420,7 +424,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             EndpointInfo endpoint = info.getEndpoint(enginePort);
 
             LOG.infov("RDS backend for instance {0}: {1}", instanceId, endpoint);
-            if (!engineParameterOptions(engine, engineParameters).isEmpty()) {
+            if (!execFree && !engineParameterOptions(engine, engineParameters).isEmpty()) {
                 awaitServerWithParameterGroup(containerName, info.containerId(), enginePort);
             }
             if (execFree) {
@@ -1136,16 +1140,16 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
      * says the system is starting up or shutting down.
      */
     static boolean postgresAcceptsConnections(String host, int port, String user) throws IOException {
-        try (java.net.Socket socket = new java.net.Socket()) {
-            socket.connect(new java.net.InetSocketAddress(host, port), 2000);
+        try (Socket socket = new Socket()) {
+            socket.connect(new InetSocketAddress(host, port), 2000);
             socket.setSoTimeout(3000);
             byte[] params = ("user\0" + user + "\0database\0postgres\0\0").getBytes(StandardCharsets.UTF_8);
-            java.io.DataOutputStream out = new java.io.DataOutputStream(socket.getOutputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             out.writeInt(8 + params.length);
             out.writeInt(196608);
             out.write(params);
             out.flush();
-            java.io.DataInputStream in = new java.io.DataInputStream(socket.getInputStream());
+            DataInputStream in = new DataInputStream(socket.getInputStream());
             int type = in.read();
             if (type == 'R') {
                 return true;

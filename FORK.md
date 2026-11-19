@@ -17,7 +17,7 @@ Update routine:
 git fetch upstream
 git checkout main && git merge --ff-only upstream/main
 git checkout local && git rebase main      # stop and analyse when a commit conflicts or an upstream change overlaps ours
-./mvnw test -Dtest='Bedrock*,Rds*,*Rds*,ContainerLauncher*,Lambda*,DockerHostResolverTest'   # JDK 25
+./mvnw test -Dtest='Bedrock*,Rds*,*Rds*,ContainerLauncher*,Lambda*,DockerHostResolverTest,PostgresReadinessProbeTest'   # JDK 25
 git push --force-with-lease origin main local
 ```
 
@@ -66,8 +66,11 @@ About 6 minutes to build, but 1.15 GB on disk and about 440 MB of RAM idle. Pin 
 
 ## Run the tests
 
+The broad test pattern includes upstream `/bin/sh` fixtures and symbolic-link tests. Those fixtures
+require a Unix environment with symbolic-link support.
+
 JDK 25 is required (`./mvnw` refuses anything else). Without a local JDK 25:
 
 ```bash
-docker run --rm -v "$PWD":/src -w /src eclipse-temurin:25-jdk-noble   bash -c 'apt-get update -qq && apt-get install -y -qq unzip >/dev/null && ./mvnw -B test -Dtest="Bedrock*,Rds*,*Rds*,ContainerLauncher*,Lambda*,DockerHostResolverTest"'
+docker run --rm -v "$PWD":/src -w /src eclipse-temurin:25-jdk-noble   bash -c 'apt-get update -qq && apt-get install -y -qq unzip >/dev/null && ./mvnw -B test -Dtest="Bedrock*,Rds*,*Rds*,ContainerLauncher*,Lambda*,DockerHostResolverTest,PostgresReadinessProbeTest"'
 ```

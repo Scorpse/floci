@@ -37,7 +37,13 @@ import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
+import java.io.DataInputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -190,6 +196,44 @@ class RdsContainerManagerTest {
         assertTrue(RdsContainerManager.buildContainerCmd(
                 DatabaseEngine.SQLSERVER, "mcr.microsoft.com/mssql/server:2022-latest",
                 Map.of("max_connections", "500")).isEmpty());
+    }
+
+    @Test
+    void postgresWithLogicalReplicationNeedsNoDockerExecInExecFreeMode() throws Exception {
+        try (ServerSocket server = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            server.setSoTimeout(5000);
+            CompletableFuture<Void> probe = CompletableFuture.runAsync(() -> {
+                try (Socket socket = server.accept()) {
+                    socket.setSoTimeout(5000);
+                    DataInputStream input = new DataInputStream(socket.getInputStream());
+                    input.readNBytes(input.readInt() - 4);
+                    socket.getOutputStream().write(new byte[]{'R', 0, 0, 0, 8, 0, 0, 0, 10});
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+            EmulatorConfig config = config(tempDir.resolve("postgres-exec-free"));
+            when(config.services().rds().initWithoutExec()).thenReturn(true);
+            ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+            stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                    "postgres-container", Map.of(5432, new ContainerLifecycleManager.EndpointInfo(
+                    "127.0.0.1", server.getLocalPort()))));
+            DockerClient dockerClient = databaseDockerClient("postgres-container");
+            when(dockerClient.copyArchiveToContainerCmd("postgres-container"))
+                    .thenReturn(mock(CopyArchiveToContainerCmd.class, RETURNS_SELF));
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            RdsContainerManager manager = autoPauseManager(config, lifecycleManager);
+
+            manager.start("db1", "db1", "db1", "floci-rds-db1", DatabaseEngine.POSTGRES,
+                    "postgres:16-alpine", "admin", "password", "db",
+                    Map.of("rds.logical_replication", "1"));
+
+            probe.get(5, TimeUnit.SECONDS);
+            verify(dockerClient, never()).execCreateCmd(anyString());
+            ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
+            verify(lifecycleManager).create(spec.capture());
+            assertEquals(List.of("-c", "wal_level=logical"), spec.getValue().cmd());
+        }
     }
 
     @Test
